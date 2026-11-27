@@ -54,8 +54,25 @@ static Arduino_Canvas *createCanvas()
 
 static void initTouch()
 {
+  pinMode(TP_RESET, OUTPUT);
+  pinMode(TP_INT, INPUT_PULLUP);
   touch.setPins(TP_RESET, TP_INT);
   touchOk = touch.begin(Wire, CST92XX_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+
+  // I2C 总线扫描：确认触摸芯片/PMIC 等是否在线
+  Serial.print("[I2C] found:");
+  uint8_t found = 0;
+  for (uint8_t a = 0x08; a < 0x78; a++)
+  {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0)
+    {
+      Serial.printf(" 0x%02X", a);
+      found++;
+    }
+  }
+  Serial.printf(" (%u)\n", found);
+
   if (!touchOk)
   {
     Serial.println("[TOUCH] CST9217 init FAILED，屏幕按钮不可用");
@@ -68,7 +85,11 @@ static void initTouch()
 #if TOUCH_MIRROR_X || TOUCH_MIRROR_Y
   touch.setMirrorXY(TOUCH_MIRROR_X, TOUCH_MIRROR_Y);
 #endif
-  Serial.printf("[TOUCH] %s ready\n", touch.getModelName());
+
+  uint16_t rx = 0, ry = 0;
+  touch.getResolution(rx, ry);
+  Serial.printf("[TOUCH] %s ready, chip res=%ux%u, max=%ux%u, swap=%d\n",
+                touch.getModelName(), rx, ry, SCREEN_W, SCREEN_H, TOUCH_SWAP_XY);
 }
 
 static void pollTouch()
@@ -86,7 +107,8 @@ static void pollTouch()
     if (!touchDown)
     {
       touchDown = true;
-      face.onTouch(x[0], y[0]);
+      const bool hit = face.onTouch(x[0], y[0]);
+      Serial.printf("[TOUCH] down (%d,%d) pts=%u hit=%d\n", x[0], y[0], points, hit);
     }
   }
   else

@@ -378,13 +378,21 @@ void MediaFace::tick()
 
 bool MediaFace::onTouch(int16_t x, int16_t y)
 {
-  if (!_ams || _ams->linkState() != AMS_LINK_READY)
+  if (!_ams)
     return false;
+
+  const AmsLinkState link = _ams->linkState();
+  if (link != AMS_LINK_READY)
+  {
+    Serial.printf("[UI] touch ignored: link=%d\n", (int)link);
+    return false;
+  }
 
   const int16_t dxp = x - BTN_PLAY_X, dyp = y - CTRL_Y;
   if ((int32_t)dxp * dxp + (int32_t)dyp * dyp <= BTN_PLAY_R * BTN_PLAY_R)
   {
-    _ams->sendCommand(AMS_CMD_TOGGLE);
+    const bool ok = _ams->sendCommand(AMS_CMD_TOGGLE);
+    Serial.printf("[UI] toggle -> %d\n", ok);
     _pressedCmd = AMS_CMD_TOGGLE;
     _pressedUntil = millis() + 140;
     _forceDraw = true;
@@ -394,7 +402,8 @@ bool MediaFace::onTouch(int16_t x, int16_t y)
   const int16_t dxl = x - BTN_PREV_X, dyl = y - CTRL_Y;
   if ((int32_t)dxl * dxl + (int32_t)dyl * dyl <= BTN_SIDE_R * BTN_SIDE_R)
   {
-    _ams->sendCommand(AMS_CMD_PREV);
+    const bool ok = _ams->sendCommand(AMS_CMD_PREV);
+    Serial.printf("[UI] prev -> %d\n", ok);
     _pressedCmd = AMS_CMD_PREV;
     _pressedUntil = millis() + 140;
     _forceDraw = true;
@@ -404,7 +413,8 @@ bool MediaFace::onTouch(int16_t x, int16_t y)
   const int16_t dxr = x - BTN_NEXT_X, dyr = y - CTRL_Y;
   if ((int32_t)dxr * dxr + (int32_t)dyr * dyr <= BTN_SIDE_R * BTN_SIDE_R)
   {
-    _ams->sendCommand(AMS_CMD_NEXT);
+    const bool ok = _ams->sendCommand(AMS_CMD_NEXT);
+    Serial.printf("[UI] next -> %d\n", ok);
     _pressedCmd = AMS_CMD_NEXT;
     _pressedUntil = millis() + 140;
     _forceDraw = true;
