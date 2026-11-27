@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""生成 1-bit 点阵 CJK 字体（C++ 源文件）。
+"""生成 2bpp 灰阶点阵 CJK 字体（C++ 源文件）。
 
 用途：Arduino_GFX 自带字体只有 ASCII，歌名/歌手中日文需要自带点阵。
-输出为「字形索引表 + 位图数据」两段，渲染时二分查找 + drawBitmap(1bit)。
+输出为「字形索引表 + 位图数据」两段，渲染时二分查找 + 逐像素 alpha 混合。
+
+为什么是 2bpp：1-bit 阈值会把 FreeType 的灰阶边缘一刀切掉，中文小字号的细笔画
+中段直接消失，看起来发虚、断笔；存成 4 级覆盖度（0/1/2/3）后绘制端按覆盖率
+与背景混合，笔画连续、边缘不再是台阶。2bpp 的位图是 1-bit 的 2 倍大小，
+刚好还塞得进 6.4MB 的 app 分区；4bpp 会超。
 
 用法：
-    python tools/gen_font.py                      # 生成 30px 标题 + 20px 正文
+    python tools/gen_font.py                      # 生成 30px 标题 + 22px 正文 + 52px 配对码数字
     python tools/gen_font.py --limit 800          # 只取前 800 个字，用于快速迭代
 """
 
 import argparse
 import os
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from fontTools.ttLib import TTCollection, TTFont
 
@@ -24,6 +30,9 @@ FONT_CANDIDATES = [
 ]
 
 EXTRA_SYMBOLS = "…—–·•♪♫→←↑↓●○■□★☆×÷°±©®™「」『』【】〈〉《》、。，．！？：；"
+
+# 配对码只用数字和空格，单独出一套大字号，避免 5x7 内置字体放大 6 倍的方块锯齿
+NUM_CHARS = "0123456789 "
 
 
 def build_charset():
@@ -73,11 +82,18 @@ def load_cmaps():
     return out
 
 
-def pick_font(cp, cmaps):
-    for path, index, cmap in cmaps:
-        if cp in cmap:
-            return path, index
-    return None
+def quantize(crop):
+    """8-bit 灰度 → 2bpp（4 级覆盖度），行按字节对齐，4 像素/字节，MSB 在左。"""
+    w, h = crop.size
+    stride = (w + 3) // 4
+    gray = np.asarray(crop, dtype=np.uint16)
+    level = ((gray * 3 + 127) // 255).astype(np.uint8)   # 0..3
+
+    padded = np.zeros((h, stride * 4), dtype=np.uint8)
+    padded[:, :w] = level
+    packed = ((padded[:, 0::4] << 6) | (padded[:, 1::4] << 4) |
+              (padded[:, 2::4] << 2) | padded[:, 3::4])
+    return packed.tobytes()
 
 
 def render_glyph(ch, size, cache):
@@ -113,18 +129,9 @@ def render_glyph(ch, size, cache):
 
     x0, y0, x1, y1 = bbox
     w, h = x1 - x0, y1 - y0
-    crop = canvas.crop(bbox).point(lambda v: 255 if v >= 110 else 0)
+    crop = canvas.crop(bbox)
 
-    stride = (w + 7) // 8
-    data = bytearray(stride * h)
-    px = crop.load()
-    for row in range(h):
-        base = row * stride
-        for col in range(w):
-            if px[col, row]:
-                data[base + (col >> 3)] |= 0x80 >> (col & 7)
-
-    result = (w, h, x0 - size // 2, y0 - size // 2, max(adv, 1), bytes(data))
+    result = (w, h, x0 - size // 2, y0 - size // 2, max(adv, 1), quantize(crop))
     cache[cp] = result
     return result
 
@@ -148,7 +155,7 @@ def emit(font_symbol, name, size, chars, out_path):
     lines.append("// 由 tools/gen_font.py 生成，请勿手工修改")
     lines.append(f'#include "cjk_font.h"')
     lines.append("")
-    lines.append(f"// {name}: {size}px, {len(glyphs)} 字形, 位图 {len(blob)} 字节")
+    lines.append(f"// {name}: {size}px/2bpp, {len(glyphs)} 字形, 位图 {len(blob)} 字节")
     lines.append("static const CjkGlyph GLYPHS[] = {")
     for cp, off, w, h, xoff, yoff, adv in glyphs:
         lines.append(f"{{0x{cp:05X},{off},{w},{h},{xoff},{yoff},{adv}}},")
@@ -183,11 +190,12 @@ def main():
         chars = set(sorted(chars)[:args.limit])
 
     jobs = [
-        ("FONT_TITLE", "font_title_30", 30, "font_title_30.cpp"),
-        ("FONT_BODY", "font_body_20", 20, "font_body_20.cpp"),
+        ("FONT_TITLE", "font_title_30", 30, "font_title_30.cpp", chars),
+        ("FONT_BODY", "font_body_22", 22, "font_body_22.cpp", chars),
+        ("FONT_NUM", "font_num_52", 52, "font_num_52.cpp", set(NUM_CHARS)),
     ]
-    for symbol, name, size, filename in jobs:
-        count, nbytes = emit(symbol, name, size, chars, os.path.join(args.out_dir, filename))
+    for symbol, name, size, filename, charset in jobs:
+        count, nbytes = emit(symbol, name, size, charset, os.path.join(args.out_dir, filename))
         print(f"{filename}: {count} 字形, {nbytes / 1024:.0f} KB 位图")
 
 

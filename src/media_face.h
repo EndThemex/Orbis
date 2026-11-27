@@ -3,6 +3,7 @@
 #include <Arduino_GFX_Library.h>
 
 #include "ams_client.h"
+#include "cjk_font.h"
 
 // ============================================================
 // 媒体播放界面（466x466 圆屏）
@@ -11,12 +12,15 @@
 //   onTouch(x, y)   命中「上一首 / 播放暂停 / 下一首」时下发 AMS Remote Command
 //
 // 布局（圆心 233,233）：
-//   r=226~230  进度环（播放进度）
+//   r=224~230  进度环（播放进度）
 //   y≈78       状态行（连接状态 + 播放器名）
-//   y≈128~210  歌名（最多两行，30px）
-//   y≈240/272  歌手 / 专辑（20px）
+//   y≈126~162  歌名（最多两行，30px）
+//   y≈208/240  歌手 / 专辑（22px）
 //   y≈352      三个圆形按钮
-//   y≈408      底部居中「已播/总时长」（20px，如 1:11/4:30）
+//   y≈408      底部居中「已播/总时长」（22px，如 1:11/4:30）
+//
+// 所有绘制都落在 Arduino_Canvas 的 framebuffer 上，字形按覆盖度混合、
+// 圆环/圆形/三角形按边缘覆盖率抗锯齿，圆屏上不再有硬边台阶。
 // ============================================================
 class MediaFace
 {
@@ -43,6 +47,7 @@ private:
   Arduino_GFX *_panel = nullptr;
   Arduino_GFX *_gfx = nullptr;
   Arduino_Canvas *_canvas = nullptr;
+  CjkSurface _surf = {nullptr, 0, 0, nullptr};
   AmsClient *_ams = nullptr;
 
   uint32_t _lastGen = 0;

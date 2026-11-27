@@ -81,28 +81,84 @@ int cjkTextWidth(const CjkFont &font, const char *utf8)
   return w;
 }
 
-static void drawGlyph(Arduino_GFX *gfx, int x, int yTop, const CjkFont &font,
+// 2bpp 覆盖度 → 1/16 覆盖率（0, 1/3, 2/3, 1 近似为 0, 5/16, 11/16, 1）
+static const uint8_t COVERAGE[4] = {0, 5, 11, 16};
+
+// RGB565 双通道并行混合：cov 以 1/16 为单位，乘 16 后按字段对齐右移 4 位，
+// 5/6/5 各字段之间有足够空位，不会互相进位。
+static inline uint16_t blend565(uint16_t dst, uint16_t src, uint8_t cov)
+{
+  const uint32_t inv = 16u - cov;
+  const uint32_t rb = ((uint32_t)(src & 0xF81F) * cov + (uint32_t)(dst & 0xF81F) * inv) >> 4;
+  const uint32_t g = ((uint32_t)(src & 0x07E0) * cov + (uint32_t)(dst & 0x07E0) * inv) >> 4;
+  return (uint16_t)((rb & 0xF81F) | (g & 0x07E0));
+}
+
+void cjkBlendPixel(const CjkSurface &surf, int16_t x, int16_t y, uint16_t color, uint8_t cov)
+{
+  if (cov == 0 || x < 0 || y < 0 || x >= surf.w || y >= surf.h)
+    return;
+
+  if (surf.fb)
+  {
+    uint16_t *p = surf.fb + (size_t)y * surf.w + x;
+    *p = (cov >= 16) ? color : blend565(*p, color, cov);
+  }
+  else if (surf.gfx)
+  {
+    // 退化路径：拿不到 framebuffer，只能按黑底混合后逐像素写面板
+    surf.gfx->writePixel(x, y, (cov >= 16) ? color : blend565(0, color, cov));
+  }
+}
+
+static void drawGlyph(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
                       uint16_t color, const CjkGlyph *g)
 {
   if (!g || g->w == 0 || g->h == 0)
     return;
-  gfx->drawBitmap(x + g->xoff, yTop + g->yoff, font.bits + g->off, g->w, g->h, color);
+
+  const int gx = x + g->xoff;
+  const int gy = yTop + g->yoff;
+  const int stride = (g->w + 3) >> 2;
+
+  int x0 = 0, x1 = g->w;
+  if (gx < 0)
+    x0 = -gx;
+  if (gx + g->w > surf.w)
+    x1 = surf.w - gx;
+  int y0 = 0, y1 = g->h;
+  if (gy < 0)
+    y0 = -gy;
+  if (gy + g->h > surf.h)
+    y1 = surf.h - gy;
+
+  for (int yy = y0; yy < y1; yy++)
+  {
+    const uint8_t *src = font.bits + g->off + (size_t)yy * stride;
+    const int py = gy + yy;
+    for (int xx = x0; xx < x1; xx++)
+    {
+      const uint8_t cov = COVERAGE[(src[xx >> 2] >> (6 - 2 * (xx & 3))) & 0x03];
+      if (cov)
+        cjkBlendPixel(surf, gx + xx, py, color, cov);
+    }
+  }
 }
 
-int cjkDrawText(Arduino_GFX *gfx, int x, int yTop, const CjkFont &font,
+int cjkDrawText(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
                 uint16_t color, const char *utf8)
 {
   int pen = x;
   while (*utf8)
   {
     const CjkGlyph *g = cjkFind(font, cjkNextCodepoint(utf8));
-    drawGlyph(gfx, pen, yTop, font, color, g);
+    drawGlyph(surf, pen, yTop, font, color, g);
     pen += glyphAdvance(font, g);
   }
   return pen - x;
 }
 
-int cjkDrawTextClipped(Arduino_GFX *gfx, int x, int yTop, const CjkFont &font,
+int cjkDrawTextClipped(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
                        uint16_t color, const char *utf8, int maxWidth, bool ellipsis)
 {
   const CjkGlyph *dots = cjkFind(font, 0x2026);
@@ -118,13 +174,13 @@ int cjkDrawTextClipped(Arduino_GFX *gfx, int x, int yTop, const CjkFont &font,
     {
       if (ellipsis && dots && pen - x + dotsAdv <= maxWidth)
       {
-        drawGlyph(gfx, pen, yTop, font, color, dots);
+        drawGlyph(surf, pen, yTop, font, color, dots);
         pen += dotsAdv;
       }
       break;
     }
 
-    drawGlyph(gfx, pen, yTop, font, color, g);
+    drawGlyph(surf, pen, yTop, font, color, g);
     pen += adv;
   }
   return pen - x;
