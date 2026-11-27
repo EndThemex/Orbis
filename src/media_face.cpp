@@ -22,10 +22,10 @@ static const int16_t TITLE_Y2 = 162;
 static const int16_t TITLE_MAX_W = 336;
 static const int16_t ARTIST_Y = 208;
 static const int16_t ALBUM_Y = 240;
-static const int16_t TIME_Y = 300;
 static const int16_t TEXT_MAX_W = 330;
 
-static const int16_t CTRL_Y = 398;
+static const int16_t CTRL_Y = 352;
+static const int16_t TIME_Y = 408;
 static const int16_t BTN_PREV_X = 132;
 static const int16_t BTN_NEXT_X = 334;
 static const int16_t BTN_PLAY_X = 233;
@@ -195,13 +195,12 @@ void MediaFace::drawNowPlaying(const MediaInfo &info)
       cjkDrawText(_gfx, (SCREEN_W - w) / 2, ALBUM_Y, FONT_BODY, COL_DIM, info.album);
   }
 
-  // 时间
-  char left[16], right[16];
-  formatTime(AmsClient::elapsedNow(info), left, sizeof(left));
-  formatTime(info.duration > 0 ? info.duration : 0, right, sizeof(right));
-  cjkDrawText(_gfx, 104, TIME_Y, FONT_BODY, COL_DIM, left);
-  cjkDrawText(_gfx, SCREEN_W - 104 - cjkTextWidth(FONT_BODY, right), TIME_Y,
-              FONT_BODY, COL_DIM, right);
+  // 时间：底部居中「已播/总时长」
+  char elapsed[16], total[16], timeText[40];
+  formatTime(AmsClient::elapsedNow(info), elapsed, sizeof(elapsed));
+  formatTime(info.duration > 0 ? info.duration : 0, total, sizeof(total));
+  snprintf(timeText, sizeof(timeText), "%s/%s", elapsed, total);
+  drawCentered(_gfx, FONT_BODY, TIME_Y, COL_DIM, timeText);
 }
 
 void MediaFace::drawIdleScreen(AmsLinkState link)

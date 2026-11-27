@@ -15,8 +15,8 @@
 //   y≈78       状态行（连接状态 + 播放器名）
 //   y≈128~210  歌名（最多两行，30px）
 //   y≈240/272  歌手 / 专辑（20px）
-//   y≈330      已播 / 总时长
-//   y≈398      三个圆形按钮
+//   y≈352      三个圆形按钮
+//   y≈408      底部居中「已播/总时长」（20px，如 1:11/4:30）
 // ============================================================
 class MediaFace
 {
@@ -24,6 +24,9 @@ public:
   void begin(Arduino_GFX *panel, Arduino_Canvas *canvas, AmsClient *ams);
 
   void tick();
+
+  // 下一帧强制整屏重绘（息屏期间不 tick，点亮后用它补一帧）
+  void invalidate() { _forceDraw = true; }
 
   // 返回 true 表示这次触摸落在按钮上并已下发命令
   bool onTouch(int16_t x, int16_t y);

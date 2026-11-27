@@ -22,6 +22,40 @@ static bool touchOk = false;
 static bool touchDown = false;
 static uint32_t lastTouchPollMs = 0;
 
+// 屏幕开关 / PWR 按键
+static bool screenOn = true;
+static bool pmuOk = false;
+static uint32_t lastPwrPollMs = 0;
+static uint32_t lastPwrEdgeMs = 0;
+
+// AXP2101 寄存器（只用 PWRKEY 边沿中断，够用且不引第三方库）
+#define AXP2101_REG_IC_TYPE 0x03
+#define AXP2101_REG_IRQ_EN1 0x41    // bit0 PWRKEY 正边沿 / bit1 负边沿 / bit3 短按
+#define AXP2101_REG_IRQ_ST1 0x49    // 与 IRQ_EN1 对应的状态寄存器
+#define AXP2101_PKEY_EDGE_MASK 0x03 // 正 / 负边沿
+
+// ---- AXP2101 最小 I2C 访问 ----
+static bool pmuWriteReg(uint8_t reg, uint8_t val)
+{
+  Wire.beginTransmission(IIC_ADDR_AXP2101);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+static bool pmuReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
+{
+  Wire.beginTransmission(IIC_ADDR_AXP2101);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0)
+    return false;
+  if (Wire.requestFrom((uint8_t)IIC_ADDR_AXP2101, (uint8_t)len) != len)
+    return false;
+  for (uint8_t i = 0; i < len; i++)
+    buf[i] = Wire.read();
+  return true;
+}
+
 static void initDisplay()
 {
   // 注意：Arduino_GFX 1.6.0 的 CO5300 构造函数多一个 bool ips 参数（1.6.4 才去掉），
@@ -92,6 +126,30 @@ static void initTouch()
                 touch.getModelName(), rx, ry, SCREEN_W, SCREEN_H, TOUCH_SWAP_XY);
 }
 
+// ---------------- 屏幕开关 ----------------
+// 官方例程（04_LVGL_AXP2101_ADC_Data 与综合项目）就是靠 AXP2101 的 PWRKEY 中断
+// 触发 toggleBacklight：AMOLED 亮度写 0 即整屏黑，恢复时写回 CLOCK_BRIGHTNESS。
+static void screenSleep()
+{
+  if (!screenOn)
+    return;
+  screenOn = false;
+  gfx->setBrightness(0);
+  Serial.println("[PWR] screen off");
+}
+
+static void screenWake()
+{
+  if (screenOn)
+    return;
+  screenOn = true;
+  // 息屏期间没跑 face.tick()，先在黑屏下补画一帧再恢复亮度，避免闪出旧画面
+  face.invalidate();
+  face.tick();
+  gfx->setBrightness(CLOCK_BRIGHTNESS);
+  Serial.println("[PWR] screen on");
+}
+
 static void pollTouch()
 {
   if (!touchOk || millis() - lastTouchPollMs < 20)
@@ -107,6 +165,12 @@ static void pollTouch()
     if (!touchDown)
     {
       touchDown = true;
+      if (!screenOn)
+      {
+        // 息屏时触摸只负责点亮，不再下发给界面
+        screenWake();
+        return;
+      }
       const bool hit = face.onTouch(x[0], y[0]);
       Serial.printf("[TOUCH] down (%d,%d) pts=%u hit=%d\n", x[0], y[0], points, hit);
     }
@@ -115,6 +179,56 @@ static void pollTouch()
   {
     touchDown = false;
   }
+}
+
+static void initPmu()
+{
+  uint8_t id = 0;
+  if (!pmuReadRegs(AXP2101_REG_IC_TYPE, &id, 1))
+  {
+    Serial.println("[PMU] AXP2101 无响应，PWR 键不可用");
+    return;
+  }
+  Serial.printf("[PMU] AXP2101 online, IC type=0x%02X\n", id);
+
+  // 打开 PWRKEY 正/负边沿中断，状态寄存器才会锁存按键事件
+  uint8_t en = 0;
+  if (pmuReadRegs(AXP2101_REG_IRQ_EN1, &en, 1))
+    pmuWriteReg(AXP2101_REG_IRQ_EN1, en | AXP2101_PKEY_EDGE_MASK);
+
+  // 清掉上电过程中残留的中断，避免一开机就误判一次按键
+  uint8_t st[3] = {0};
+  if (pmuReadRegs(AXP2101_REG_IRQ_ST1 - 1, st, 3))
+  {
+    pmuWriteReg(AXP2101_REG_IRQ_ST1 - 1, st[0]);
+    pmuWriteReg(AXP2101_REG_IRQ_ST1, st[1]);
+    pmuWriteReg(AXP2101_REG_IRQ_ST1 + 1, st[2]);
+  }
+  pmuOk = true;
+}
+
+// PWR 键：一次单击会先后产生「按下」「松开」两个边沿，500ms 内只认第一次
+static void pollPowerKey()
+{
+  if (!pmuOk || millis() - lastPwrPollMs < 20)
+    return;
+  lastPwrPollMs = millis();
+
+  uint8_t st = 0;
+  if (!pmuReadRegs(AXP2101_REG_IRQ_ST1, &st, 1))
+    return;
+  if (!(st & AXP2101_PKEY_EDGE_MASK))
+    return;
+  pmuWriteReg(AXP2101_REG_IRQ_ST1, st); // 写 1 清中断
+
+  if (millis() - lastPwrEdgeMs < 500)
+    return;
+  lastPwrEdgeMs = millis();
+
+  if (screenOn)
+    screenSleep();
+  else
+    screenWake();
 }
 
 void setup()
@@ -128,6 +242,7 @@ void setup()
 
   face.begin(gfx, canvas, &ams);
   initTouch();
+  initPmu();
 
   ams.begin();
   face.tick();   // 立刻出一帧「等待配对」，别让屏幕空着
@@ -136,7 +251,9 @@ void setup()
 void loop()
 {
   ams.loop();
+  pollPowerKey();
   pollTouch();
-  face.tick();
+  if (screenOn)
+    face.tick();
   delay(10);
 }

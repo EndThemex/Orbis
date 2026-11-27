@@ -44,7 +44,9 @@
 #endif
 
 // ---- 触摸校准（默认与屏幕同向；坐标不对时改这三项）----
-// 实测本板 CST9217 的 Y 轴与屏幕上下颠倒：点屏幕底部会上报 y≈40，故镜像 Y
+// 实测本板 CST9217 的触摸坐标系相对屏幕是 180° 翻转的（X/Y 都要镜像）：
+//   Y：点屏幕底部会上报 y≈40，故镜像 Y
+//   X：点左边「上一首」会上报 x≈334（右边），结果触发成下一首，故镜像 X
 #define TOUCH_SWAP_XY 0
-#define TOUCH_MIRROR_X 0
+#define TOUCH_MIRROR_X 1
 #define TOUCH_MIRROR_Y 1
