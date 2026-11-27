@@ -255,5 +255,6 @@ void loop()
   pollTouch();
   if (screenOn)
     face.tick();
-  delay(10);
+  // 5ms 让 UI 的 30fps 节拍更准（tick 内部自己按 FRAME_MS 限流，不会多画）
+  delay(5);
 }

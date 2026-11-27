@@ -158,6 +158,68 @@ int cjkDrawText(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
   return pen - x;
 }
 
+// 带亚像素横向偏移的字形：把每列覆盖率按 1/16 权重摊到相邻两列后再混合一次，
+// 这样滚动位置可以落在像素之间，视觉上才是匀速滑动。
+static void drawGlyphSubpixel(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
+                             uint16_t color, const CjkGlyph *g, uint8_t frac)
+{
+  if (!g || g->w == 0 || g->h == 0 || frac == 0)
+  {
+    drawGlyph(surf, x, yTop, font, color, g);
+    return;
+  }
+
+  const int gx = x + g->xoff;
+  const int gy = yTop + g->yoff;
+  const int stride = (g->w + 3) >> 2;
+  // 一列最多同时收到左右两列字形的贡献，最多 16 + 16，用 uint8 累加不会溢出
+  uint8_t acc[64];
+  const int cols = g->w < (int)sizeof(acc) - 1 ? g->w : (int)sizeof(acc) - 1;
+  const uint8_t inv = (uint8_t)(16 - frac);
+
+  for (int yy = 0; yy < g->h; yy++)
+  {
+    const int py = gy + yy;
+    if (py < 0 || py >= surf.h)
+      continue;
+
+    memset(acc, 0, (size_t)cols + 1);
+    const uint8_t *src = font.bits + g->off + (size_t)yy * stride;
+    for (int xx = 0; xx < cols; xx++)
+    {
+      const uint8_t c = COVERAGE[(src[xx >> 2] >> (6 - 2 * (xx & 3))) & 0x03];
+      if (!c)
+        continue;
+      acc[xx] += (uint8_t)((c * inv + 8) >> 4);
+      acc[xx + 1] += (uint8_t)((c * frac + 8) >> 4);
+    }
+
+    for (int xx = 0; xx <= cols; xx++)
+    {
+      uint8_t cov = acc[xx];
+      if (!cov)
+        continue;
+      if (cov > 16)
+        cov = 16;
+      cjkBlendPixel(surf, gx + xx, py, color, cov);
+    }
+  }
+}
+
+int cjkDrawTextSubpixel(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
+                        uint16_t color, const char *utf8, uint8_t subpx)
+{
+  const uint8_t frac = subpx >> 4;   // 0..15，1/16 像素
+  int pen = x;
+  while (*utf8)
+  {
+    const CjkGlyph *g = cjkFind(font, cjkNextCodepoint(utf8));
+    drawGlyphSubpixel(surf, pen, yTop, font, color, g, frac);
+    pen += glyphAdvance(font, g);
+  }
+  return pen - x;
+}
+
 int cjkDrawTextClipped(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
                        uint16_t color, const char *utf8, int maxWidth, bool ellipsis)
 {

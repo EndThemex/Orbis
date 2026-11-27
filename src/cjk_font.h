@@ -67,6 +67,11 @@ int cjkDrawTextClipped(const CjkSurface &surf, int x, int yTop, const CjkFont &f
                        uint16_t color, const char *utf8, int maxWidth,
                        bool ellipsis = true);
 
+// 亚像素横向绘制：subpx = 0..255 表示额外再右移不足一个像素的部分。
+// 每列覆盖率按 (1-t)/t 拆分到左右相邻两列，滚动文字才能连续滑动而不是一格一格跳。
+int cjkDrawTextSubpixel(const CjkSurface &surf, int x, int yTop, const CjkFont &font,
+                        uint16_t color, const char *utf8, uint8_t subpx);
+
 // 折行：最多 maxLines 行；放不下时最后一行以 … 结尾。
 // out 是 maxLines 个长度为 stride 的缓冲；返回实际行数。
 int cjkWrapText(const CjkFont &font, const char *utf8, int maxWidth, int maxLines,

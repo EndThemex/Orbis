@@ -74,12 +74,14 @@ docs/                   # 预览图与巡检资料
 | 状态行（连接状态 / 播放器名） | y=78，左侧带 4px 状态圆点 | FONT_BODY 22px |
 | 歌名（最多两行，超出用 …） | y=126 / 162（单行时 138） | FONT_TITLE 30px |
 | 歌手 / 专辑（超宽自动截断） | y=208 / 240 | FONT_BODY 22px |
-| 三个圆形按钮 | y=352，x=132 / 233 / 334，r=30 / 42 / 30 | — |
+| 三个圆形按钮 | y=352，x=132 / 233 / 334，r=37 / 42 / 37 | — |
 | 已播/总时长 | y=408 | FONT_BODY 22px |
 | 配对码 | y=168（墨迹 184–225） | FONT_NUM 52px |
 
-重绘策略：内容变化、或播放中每 250ms（暂停时 1000ms）整帧重绘一次，画在 PSRAM 的
-`Arduino_Canvas` 上再 `flush()`，所以不会闪。息屏时不 tick，点亮前先补一帧。
+重绘策略：只有布局/文案真的变化（换歌、暂停、连接状态、按键高亮）才整帧重绘一次；
+播放过程中按固定 30fps 做**局部刷新**——进度环只补「旧弧尖→新弧尖」那一小块、
+时间文字只在秒变化时重画、滚动文字带各自推自己那一条，不再整屏 `flush()`
+（整帧 434KB 搬一次就是几十毫秒，那正是卡顿的来源）。息屏时不 tick，点亮前先补一帧。
 
 ### 渲染管线（重要）
 
@@ -104,10 +106,12 @@ docs/                   # 预览图与巡检资料
    - `coverage(d)`：把「到边缘的距离」映射成 0–16 的 1/16 覆盖率，`d>=0.5` 直接覆盖、`d<=-0.5` 跳过。
    - `fillCircleAA` / `strokeCircleAA`：圆形按半径距离算覆盖率；细环用 `width=1.0`。
    - `fillTriangleAA`：三条有向边的距离取最小值（`edgeDist`），对角线自然获得抗锯齿。
-   - `drawRingSegmentAA` + `ringSpan`：**按行先算环带 x 区间**（外圈 `xo`、内圈 `xi`，
+   - `paintRingRect` + `ringSpanC`：**按行先算环带 x 区间**（外圈 `xo`、内圈 `xi`，
      `xi==0` 时整行只画一次避免中心像素重复混合），只遍历环带内约 8.6k 像素，不是整圆 bbox 21 万像素；
-     进度弧用 `atan2f` 判断角度落在 `[a0, a1]`（0° 在 12 点、顺时针），端面是硬切。
-   - 帧成本：整帧填充 + 环 ~8.6k px + 圆形/三角形 ~25k px + 文字 ~6k px，250ms 一帧余量充足。
+     进度弧的弧尖按「弧长像素」算覆盖率（`coverage(dist * (deg - ang) * DEG2RAD)`），
+     所以不再按 `atan2f` 硬切角度，弧尖走动是亚像素平滑的。
+   - 增量刷新时只给 `paintRingRect` 一个包围盒（`wedgeBBox` 由脏角度算出来），帧内成本约几百像素。
+   - 帧成本：整帧填充 + 环 ~8.6k px + 圆形/三角形 ~25k px + 文字 ~6k px，只在换歌等时机做一次。
 
 ### 改字体 / 改字号
 
@@ -155,7 +159,8 @@ python tools/preview_face.py --title 想你的夜 --artist 周杰伦 --progress 
   - Track 属性：0=Artist / 1=Album / 2=Title / 3=Duration
 - 控制命令走 Remote Command 的写特征值：0=Play / 1=Pause / 2=Toggle / 3=Next / 4=Prev。
 - **进度条不靠 iPhone 每秒推送**：收到 PlaybackInfo 时记下 `elapsed` 和本地毫秒时刻，
-  UI 用 `AmsClient::elapsedNow()` 按 `rate` 外推；`generation` 每次内容变化 +1，`tick()` 靠它判断要不要重绘。
+  UI 用 `AmsClient::elapsedNow()` 按 `rate` 外推；`tick()` 只对歌名/歌手/专辑/播放状态等
+  做指纹比对（`elapsed` 不参与），内容没变时走局部刷新，不再为了走进度条整屏重绘。
 - 断连后自动回到广播状态（日志 `[AMS] disconnected, resume advertising`），等待下次连接。
 
 ## 旧表盘（`src/clock_face.cpp`，当前未接线）
