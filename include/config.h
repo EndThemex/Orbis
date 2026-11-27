@@ -36,3 +36,14 @@
 // ---- 校时周期 ----
 #define WIFI_RETRY_MS (30UL * 1000UL)       // 断网重连间隔
 #define NTP_RESYNC_MS (60UL * 60UL * 1000UL) // 每小时重新校时
+
+// ---- BLE / AMS ----
+// iPhone「设置 → 蓝牙」里显示的设备名
+#ifndef BLE_DEVICE_NAME
+#define BLE_DEVICE_NAME "Orbis"
+#endif
+
+// ---- 触摸校准（默认与屏幕同向；坐标不对时改这三项）----
+#define TOUCH_SWAP_XY 0
+#define TOUCH_MIRROR_X 0
+#define TOUCH_MIRROR_Y 0

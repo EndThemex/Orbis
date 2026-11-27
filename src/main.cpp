@@ -1,117 +1,29 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <sys/time.h>
-#include <time.h>
+#include <Wire.h>
 
+#include <TouchDrvCSTXXX.hpp>
+
+#include "ams_client.h"
 #include "board_pins.h"
-#include "clock_face.h"
 #include "config.h"
+#include "media_face.h"
 
 // 显示
 static Arduino_DataBus *bus = nullptr;
 static Arduino_CO5300 *gfx = nullptr;
-static ClockFace face;
 
-// 时间状态
-static bool timeSynced = false;        // 是否已经从 NTP 拿到真实时间
-static uint32_t lastWifiTryMs = 0;     // 上次尝试连 WiFi
-static uint32_t lastSyncTryMs = 0;     // 上次尝试校时
+// 媒体页 + AMS
+static AmsClient ams;
+static MediaFace face;
 
-// ============================================================
-// 时间工具
-// ============================================================
+// 触摸
+static TouchDrvCST92xx touch;
+static bool touchOk = false;
+static bool touchDown = false;
+static uint32_t lastTouchPollMs = 0;
 
-// 用编译时间兜底：没有 WiFi 也能看到钟在走，只是不准
-static time_t buildEpoch()
+static void initDisplay()
 {
-  static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  char mon[4] = {0};
-  int day = 1, year = 2024;
-  sscanf(__DATE__, "%3s %d %d", mon, &day, &year);
-
-  int monIdx = 0;
-  const char *p = strstr(months, mon);
-  if (p)
-    monIdx = (int)(p - months) / 3;
-
-  struct tm t = {};
-  t.tm_year = year - 1900;
-  t.tm_mon = monIdx;
-  t.tm_mday = day;
-  sscanf(__TIME__, "%d:%d:%d", &t.tm_hour, &t.tm_min, &t.tm_sec);
-  t.tm_isdst = -1;
-  return mktime(&t);
-}
-
-static void applyEpoch(time_t epoch)
-{
-  struct timeval tv = {};
-  tv.tv_sec = epoch;
-  tv.tv_usec = 0;
-  settimeofday(&tv, nullptr);
-}
-
-// ============================================================
-// WiFi / NTP
-// ============================================================
-
-static bool waitForWiFi(uint32_t timeoutMs)
-{
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    if (millis() - start > timeoutMs)
-      return false;
-    Serial.print('.');
-    delay(300);
-  }
-  Serial.println();
-  return true;
-}
-
-// 等 SNTP 把系统时间改写掉（时间变了就说明同步成功）
-static bool waitForNtpSync(time_t before, uint32_t timeoutMs)
-{
-  uint32_t start = millis();
-  while (millis() - start < timeoutMs)
-  {
-    if (time(nullptr) != before)
-      return true;
-    delay(200);
-  }
-  return false;
-}
-
-static void startWifi()
-{
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);          // 关省电，避免时钟走时抖动
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  lastWifiTryMs = millis();
-}
-
-static bool syncFromNtp(uint32_t waitMs)
-{
-  if (WiFi.status() != WL_CONNECTED)
-    return false;
-
-  lastSyncTryMs = millis();
-  time_t before = time(nullptr);
-  configTzTime(TZ_STRING, NTP_SERVER_1, NTP_SERVER_2);   // 同时设置 TZ + 起 SNTP
-  return waitForNtpSync(before, waitMs);
-}
-
-// ============================================================
-// setup / loop
-// ============================================================
-
-void setup()
-{
-  Serial.begin(115200);
-  delay(200);
-  Serial.println("\n[Orbis] round clock boot");
-
-  // 屏幕
   // 注意：Arduino_GFX 1.6.0 的 CO5300 构造函数多一个 bool ips 参数（1.6.4 才去掉），
   //       漏掉它会让后续参数整体左移 → w/h/offset 全错，屏幕画不出东西。
   bus = new Arduino_ESP32QSPI(LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
@@ -124,103 +36,85 @@ void setup()
 
   gfx->fillScreen(0);
   gfx->setBrightness(CLOCK_BRIGHTNESS);
-  Serial.printf("[MEM] PSRAM total %u KB, free %u KB\n",
-                ESP.getPsramSize() / 1024, ESP.getFreePsram() / 1024);
+}
 
-  // ---- 离屏画布：466x466x2 = 434KB，放 PSRAM ----
-  // 有画布时每秒"整帧重绘 + 一次推送"，指针可以压在刻度和数字上且不闪；
-  // 分配失败则退回直绘（会有轻微闪烁），功能不受影响。
+static Arduino_Canvas *createCanvas()
+{
+  // 466x466x2 = 434KB，放 PSRAM；有画布才能整帧重绘不闪
   Arduino_Canvas *canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, gfx);
-  bool canvasOk = canvas->begin(GFX_SKIP_OUTPUT_BEGIN) && canvas->getFramebuffer();
-  if (!canvasOk)
+  if (!canvas->begin(GFX_SKIP_OUTPUT_BEGIN) || !canvas->getFramebuffer())
   {
     Serial.println("[LCD] canvas alloc FAILED, 退回直绘模式");
-    canvas = nullptr;
+    delete canvas;
+    return nullptr;
+  }
+  Serial.println("[LCD] canvas ready (PSRAM framebuffer)");
+  return canvas;
+}
+
+static void initTouch()
+{
+  touch.setPins(TP_RESET, TP_INT);
+  touchOk = touch.begin(Wire, CST92XX_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+  if (!touchOk)
+  {
+    Serial.println("[TOUCH] CST9217 init FAILED，屏幕按钮不可用");
+    return;
+  }
+  touch.setMaxCoordinates(SCREEN_W, SCREEN_H);
+#if TOUCH_SWAP_XY
+  touch.setSwapXY(true);
+#endif
+#if TOUCH_MIRROR_X || TOUCH_MIRROR_Y
+  touch.setMirrorXY(TOUCH_MIRROR_X, TOUCH_MIRROR_Y);
+#endif
+  Serial.printf("[TOUCH] %s ready\n", touch.getModelName());
+}
+
+static void pollTouch()
+{
+  if (!touchOk || millis() - lastTouchPollMs < 20)
+    return;
+  lastTouchPollMs = millis();
+
+  int16_t x[1] = {0}, y[1] = {0};
+  const uint8_t points = touch.getPoint(x, y, 1);
+
+  if (points > 0)
+  {
+    // 只在按下的第一帧触发，避免长按连续发命令
+    if (!touchDown)
+    {
+      touchDown = true;
+      face.onTouch(x[0], y[0]);
+    }
   }
   else
   {
-    Serial.println("[LCD] canvas ready (PSRAM framebuffer)");
+    touchDown = false;
   }
+}
 
-  // ---- 时区 + 兜底时间 ----
-  setenv("TZ", TZ_STRING, 1);
-  tzset();
-  time_t fallback = buildEpoch();
-  applyEpoch(fallback);           // 以编译时间起步
-  Serial.printf("[TIME] fallback = %s", ctime(&fallback));
+void setup()
+{
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\n[Orbis] media remote boot");
 
-  // ---- 表盘 ----
-  face.begin(gfx, canvas);        // gfx = 面板，canvas 非空则离屏重绘 + 旋转推屏
-  face.setSynced(false);          // 未校时 → 琥珀色秒针/秒环
+  initDisplay();
+  Arduino_Canvas *canvas = createCanvas();
 
-  time_t now = time(nullptr);
-  struct tm tmv;
-  localtime_r(&now, &tmv);
-  face.tick(tmv);
+  face.begin(gfx, canvas, &ams);
+  initTouch();
 
-  // ---- 联网校时（失败不影响出画面）----
-  startWifi();
-  Serial.printf("[WiFi] connecting to %s\n", WIFI_SSID);
-  if (waitForWiFi(15000))
-  {
-    Serial.printf("[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
-    if (syncFromNtp(10000))
-    {
-      timeSynced = true;
-      Serial.println("[NTP] time synced");
-    }
-    else
-    {
-      Serial.println("[NTP] sync timeout");
-    }
-  }
-  else
-  {
-    Serial.println("[WiFi] connect timeout, 先用编译时间运行");
-  }
-
-  face.setSynced(timeSynced);
-  now = time(nullptr);
-  localtime_r(&now, &tmv);
-  face.tick(tmv);
+  ams.begin();
+  face.tick();   // 立刻出一帧「等待配对」，别让屏幕空着
 }
 
 void loop()
 {
-  time_t now = time(nullptr);
-  struct tm tmv;
-  localtime_r(&now, &tmv);
-
-  uint32_t t0 = micros();
-  bool drew = face.tick(tmv);      // 内部按秒去重，只有秒变化才重绘
-  static uint32_t lastPerfMs = 0;
-  if (drew && millis() - lastPerfMs > 30000UL)
-  {
-    Serial.printf("[PERF] frame = %lu us\n", micros() - t0);
-    lastPerfMs = millis();
-  }
-
-  // 断网重连
-  if (WiFi.status() != WL_CONNECTED && millis() - lastWifiTryMs > WIFI_RETRY_MS)
-  {
-    Serial.println("[WiFi] retry...");
-    WiFi.disconnect();
-    startWifi();
-  }
-
-  // 定期重新校时
-  if (millis() - lastSyncTryMs > NTP_RESYNC_MS || (!timeSynced && millis() - lastSyncTryMs > 60000UL))
-  {
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      Serial.println("[NTP] resync...");
-      bool ok = syncFromNtp(8000);
-      if (ok != timeSynced)
-        face.setSynced(ok);
-      timeSynced = ok;
-    }
-    lastSyncTryMs = millis();
-  }
-
-  delay(80);
+  ams.loop();
+  pollTouch();
+  face.tick();
+  delay(10);
 }
